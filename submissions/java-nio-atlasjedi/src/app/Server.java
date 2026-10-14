@@ -39,6 +39,7 @@ final class Server {
         ByteBuffer pending;
         long lastActive;
         boolean closeAfterWrite;
+        Conn prev, next; // intrusive LRU links (head = least recently active)
 
         Conn(SocketChannel ch, SelectionKey key) {
             this.ch = ch;
@@ -54,9 +55,19 @@ final class Server {
     private final Http.Request req = new Http.Request();
     private final Handler handler;
     private int openCount; // loop-thread counter, mirrored to the volatile
+    private final int maxConns;
+    private Conn lruHead, lruTail;
 
-    Server(String host, int port, int backlog, Handler handler) throws IOException {
+    /** Cap derived from the fd limit: nofile - 512, clamped to [1024, 1_000_000]; 60_000 when unknown. */
+    static int defaultMaxConns() {
+        long n = Os.nofileSoftLimit();
+        if (n < 0) return 60_000;
+        return (int) Math.max(1024, Math.min(1_000_000, n - 512));
+    }
+
+    Server(String host, int port, int backlog, Handler handler, int maxConns) throws IOException {
         this.handler = handler;
+        this.maxConns = maxConns;
         selector = Selector.open();
         listener = ServerSocketChannel.open();
         listener.configureBlocking(false);
@@ -102,12 +113,15 @@ final class Server {
             SocketChannel ch;
             while ((ch = listener.accept()) != null) {
                 try {
+                    while (openCount >= maxConns && lruHead != null) evict(lruHead);
                     ch.configureBlocking(false);
                     ch.setOption(StandardSocketOptions.TCP_NODELAY, true);
                     SelectionKey k = ch.register(selector, 0);
                     Conn c = new Conn(ch, k);
                     k.attach(c);
                     k.interestOps(SelectionKey.OP_READ);
+                    c.lastActive = System.nanoTime();
+                    touch(c);
                     openCount++;
                     open = openCount;
                 } catch (Throwable t) {
@@ -119,9 +133,31 @@ final class Server {
         }
     }
 
+    private void touch(Conn c) {
+        if (lruTail == c) return;
+        unlink(c);
+        c.prev = lruTail;
+        if (lruTail != null) lruTail.next = c; else lruHead = c;
+        lruTail = c;
+    }
+
+    private void unlink(Conn c) {
+        if (c.prev != null) c.prev.next = c.next; else if (lruHead == c) lruHead = c.next;
+        if (c.next != null) c.next.prev = c.prev; else if (lruTail == c) lruTail = c.prev;
+        c.prev = null;
+        c.next = null;
+    }
+
+    /** Drops a connection with an RST (linger 0: no TIME_WAIT). */
+    private void evict(Conn c) {
+        try { c.ch.setOption(StandardSocketOptions.SO_LINGER, 0); } catch (Throwable ignored) { }
+        close(c);
+    }
+
     private void close(Conn c) {
         if (c.key.attachment() == null) return;
         c.key.attach(null);
+        unlink(c);
         c.key.cancel();
         try { c.ch.close(); } catch (IOException ignored) { }
         c.pending = null;
@@ -138,6 +174,7 @@ final class Server {
             return;
         }
         c.lastActive = System.nanoTime();
+        touch(c);
         readBuf.flip();
         if (c.partialLen == 0) {
             readBuf.get(work, 0, n);

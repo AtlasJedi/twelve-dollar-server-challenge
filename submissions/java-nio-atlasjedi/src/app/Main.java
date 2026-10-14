@@ -9,7 +9,7 @@ public final class Main {
     static Server start(String dbPath, byte[] secret, String host, int port) throws java.io.IOException {
         Db db = Db.open(dbPath);
         Router router = new Router(new Handlers(db), new Jwt(secret));
-        return new Server(host, port, 4096, router);
+        return new Server(host, port, 4096, router, Server.defaultMaxConns());
     }
 
     private static String env(String k, String def) {

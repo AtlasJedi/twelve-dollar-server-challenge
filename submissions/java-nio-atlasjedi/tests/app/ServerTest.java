@@ -52,7 +52,7 @@ public class ServerTest {
     }
 
     public static void main(String[] args) throws Exception {
-        Server server = new Server("127.0.0.1", 0, 4096, ECHO);
+        Server server = new Server("127.0.0.1", 0, 4096, ECHO, 100_000);
         int port = server.port();
         check(port > 0, "port " + port);
         Thread loop = new Thread(server::run, "loop");
