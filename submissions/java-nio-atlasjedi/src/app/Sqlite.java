@@ -29,6 +29,10 @@ final class Sqlite implements AutoCloseable {
         FunctionDescriptor.of(JAVA_INT, ADDRESS, JAVA_INT, ADDRESS, JAVA_INT, ADDRESS), Linker.Option.critical(true));
     private static final MethodHandle STEP = h("sqlite3_step", FunctionDescriptor.of(JAVA_INT, ADDRESS));
     private static final MethodHandle COL_INT64 = h("sqlite3_column_int64", FunctionDescriptor.of(JAVA_LONG, ADDRESS, JAVA_INT));
+    /** One global view of the whole address space: native pointers are used as offsets, no per-read reinterpret. */
+    static final MemorySegment ALL = MemorySegment.NULL.reinterpret(Long.MAX_VALUE);
+    /** sqlite3_column_text returning the raw address (JAVA_LONG), no MemorySegment allocated per call. */
+    private static final MethodHandle COL_TEXT_ADDR = h("sqlite3_column_text", FunctionDescriptor.of(JAVA_LONG, ADDRESS, JAVA_INT));
     private static final MethodHandle COL_TEXT = h("sqlite3_column_text", FunctionDescriptor.of(ADDRESS, ADDRESS, JAVA_INT));
     private static final MethodHandle COL_BYTES = h("sqlite3_column_bytes", FunctionDescriptor.of(JAVA_INT, ADDRESS, JAVA_INT));
     private static final MethodHandle RESET = h("sqlite3_reset", FunctionDescriptor.of(JAVA_INT, ADDRESS));
@@ -243,14 +247,27 @@ final class Sqlite implements AutoCloseable {
             }
         }
 
-        /** Copies the column's UTF-8 bytes into dst at its position and advances the position. */
-        void copyText(int c, ByteBuffer dst) {
+        /** Address of the column's UTF-8 bytes (valid until the next step/reset); read it through {@link #ALL}. */
+        long colTextAddr(int c) {
             try {
-                MemorySegment p = (MemorySegment) COL_TEXT.invokeExact(st, c);
+                return (long) COL_TEXT_ADDR.invokeExact(st, c);
+            } catch (Throwable t) {
+                throw sneaky(t);
+            }
+        }
+
+        /**
+         * Copies the column's UTF-8 bytes into dst at its position and advances the position. dstSeg is a view of dst
+         * created once with position 0 and full capacity (ByteBuffer.clear() first), indexed by absolute position.
+         */
+        void copyText(int c, ByteBuffer dst, MemorySegment dstSeg) {
+            try {
+                long addr = (long) COL_TEXT_ADDR.invokeExact(st, c);
                 int n = (int) COL_BYTES.invokeExact(st, c);
+                int pos = dst.position();
                 if (n > dst.remaining()) throw new java.nio.BufferOverflowException();
-                MemorySegment.copy(p.reinterpret(n), 0, MemorySegment.ofBuffer(dst), 0, n);
-                dst.position(dst.position() + n);
+                MemorySegment.copy(ALL, addr, dstSeg, pos, n);
+                dst.position(pos + n);
             } catch (RuntimeException | Error e) {
                 throw e;
             } catch (Throwable t) {

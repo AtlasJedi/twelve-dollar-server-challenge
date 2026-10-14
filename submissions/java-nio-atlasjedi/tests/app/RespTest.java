@@ -53,8 +53,8 @@ public class RespTest {
             byte[] u = "café \"x\"\n".getBytes(StandardCharsets.UTF_8);
             MemorySegment seg = a.allocate(u.length + 1);
             MemorySegment.copy(u, 0, seg, ValueLayout.JAVA_BYTE, 0, u.length);
-            ByteBuffer b = ByteBuffer.allocateDirect(64);
-            Resp.str(b, seg, u.length);
+            ByteBuffer b = Resp.body();
+            Resp.str(b, seg.address(), u.length);
             eq("\"café \\\"x\\\"\\n\"", drain(b), "segment");
         }
 

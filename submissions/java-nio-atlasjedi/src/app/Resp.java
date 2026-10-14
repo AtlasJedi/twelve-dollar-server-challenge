@@ -103,6 +103,8 @@ final class Resp {
     // ---- two-pass bodies ----
 
     private static final ByteBuffer BODY = ByteBuffer.allocateDirect(256 * 1024);
+    /** View of the whole BODY buffer, created once (position 0, full capacity); index by absolute position. */
+    static final MemorySegment BODY_SEG = MemorySegment.ofBuffer(BODY);
 
     /** The reusable body buffer, cleared. Event-loop thread only. */
     static ByteBuffer body() {
@@ -160,31 +162,27 @@ final class Resp {
         b.put((byte) '"');
     }
 
-    /** Same as above, reading len bytes from the start of a native segment (e.g. sqlite3_column_text). */
-    static void str(ByteBuffer b, MemorySegment seg, int len) {
+    /** Same as above, reading len bytes at native address addr (e.g. sqlite3_column_text). b must be {@link #body()}. */
+    static void str(ByteBuffer b, long addr, int len) {
         b.put((byte) '"');
         int run = 0;
         for (int i = 0; i < len; i++) {
-            int c = seg.get(ValueLayout.JAVA_BYTE, i);
+            int c = Sqlite.ALL.get(ValueLayout.JAVA_BYTE, addr + i);
             if (c == '"' || c == '\\' || (c >= 0 && c < 0x20)) {
-                if (i > run) {
-                    copyRun(b, seg, run, i - run);
-                }
+                if (i > run) copyRun(b, addr, run, i - run);
                 esc(b, c);
                 run = i + 1;
             }
         }
-        if (len > run) {
-            copyRun(b, seg, run, len - run);
-        }
+        if (len > run) copyRun(b, addr, run, len - run);
         b.put((byte) '"');
     }
 
-    private static void copyRun(ByteBuffer b, MemorySegment seg, int from, int n) {
+    private static void copyRun(ByteBuffer b, long addr, int from, int n) {
+        int pos = b.position();
         if (b.remaining() < n) throw new java.nio.BufferOverflowException();
-        // ofBuffer views [position, limit) of the buffer, so offset 0 is the current write position
-        MemorySegment.copy(seg, from, MemorySegment.ofBuffer(b), 0, n);
-        b.position(b.position() + n);
+        MemorySegment.copy(Sqlite.ALL, addr + from, BODY_SEG, pos, n);
+        b.position(pos + n);
     }
 
     /** Decimal ASCII digits, no allocation. */

@@ -30,7 +30,7 @@ public class SqliteTest {
             String body = s.colText(0).getString(0);
             check(golden.equals(body), "body: " + body);
             ByteBuffer bb = ByteBuffer.allocateDirect(256);
-            s.copyText(0, bb);
+            s.copyText(0, bb, java.lang.foreign.MemorySegment.ofBuffer(bb));
             check(bb.position() == n, "copyText position " + bb.position());
             check(new String(bytesOf(bb), StandardCharsets.UTF_8).equals(golden), "copyText content");
             s.reset();

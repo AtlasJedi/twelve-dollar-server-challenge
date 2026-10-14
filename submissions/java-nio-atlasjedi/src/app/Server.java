@@ -144,9 +144,9 @@ final class Server {
         if (n > 0) {
             ByteBuffer p = c.pending;
             if (p == null) {
-                p = ByteBuffer.allocateDirect(n);
+                p = ByteBuffer.allocate(n);
             } else {
-                ByteBuffer q = ByteBuffer.allocateDirect(p.remaining() + n);
+                ByteBuffer q = ByteBuffer.allocate(p.remaining() + n);
                 q.put(p);
                 p = q;
             }

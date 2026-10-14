@@ -94,6 +94,7 @@ final class Db {
     final byte[] createdAt = new byte[32];
     int createdLen;
     private final ByteBuffer createdBuf = ByteBuffer.wrap(createdAt);
+    private final java.lang.foreign.MemorySegment createdSeg = java.lang.foreign.MemorySegment.ofBuffer(createdBuf);
 
     /**
      * Inserts the post into the tick's transaction and returns its id; the row is durable only after {@link #commitTick()}.
@@ -107,7 +108,7 @@ final class Db {
             if (!create.step()) throw new IllegalStateException("INSERT RETURNING gave no row");
             long id = create.colLong(0);
             createdBuf.clear();
-            create.copyText(1, createdBuf);
+            create.copyText(1, createdBuf, createdSeg);
             createdLen = createdBuf.position();
             if (create.step()) throw new IllegalStateException("INSERT RETURNING gave a second row");
             wrote();
@@ -206,11 +207,11 @@ final class Db {
         b.put(K_ID);
         Resp.num(b, st.colLong(0));
         b.put(K_BODY);
-        Resp.str(b, st.colText(1), st.colBytes(1));
+        Resp.str(b, st.colTextAddr(1), st.colBytes(1));
         b.put(K_AT);
-        st.copyText(2, b);
+        st.copyText(2, b, Resp.BODY_SEG);
         b.put(K_AUTHOR);
-        Resp.str(b, st.colText(3), st.colBytes(3));
+        Resp.str(b, st.colTextAddr(3), st.colBytes(3));
         b.put(K_LIKES);
         Resp.num(b, st.colLong(4));
         b.put((byte) '}');
