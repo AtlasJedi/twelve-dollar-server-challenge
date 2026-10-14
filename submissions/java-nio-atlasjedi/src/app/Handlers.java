@@ -5,18 +5,18 @@ import java.nio.charset.StandardCharsets;
 
 /**
  * The five endpoints. Each handler fills Resp.body() and calls Resp.send only on success, so an exception
- * leaves the out buffer untouched and the Router can write a clean 500. Health is real; the rest are stubs
- * until Tasks 8-10.
+ * leaves the out buffer untouched and the Router can write a clean 500. Health, feed and post are real; create/like are
+ * stubs until Tasks 9-10.
  */
 final class Handlers {
     private static final byte[] H_OK = ascii("{\"status\":\"ok\",\"db\":\"ok\",\"uptime_s\":");
     private static final byte[] H_DEG = ascii("{\"status\":\"degraded\",\"db\":\"unreachable\",\"error\":");
 
-    private final Sqlite.Stmt ping;
+    private final Db db;
     private final long startNanos = System.nanoTime();
 
-    Handlers(Sqlite db) {
-        ping = db.prepare("SELECT 1");
+    Handlers(Db db) {
+        this.db = db;
     }
 
     private static byte[] ascii(String s) {
@@ -28,9 +28,7 @@ final class Handlers {
         boolean ok;
         String err = null;
         try {
-            ping.reset();
-            ok = ping.step();
-            ping.reset();
+            ok = db.health();
         } catch (RuntimeException e) {
             ok = false;
             err = String.valueOf(e.getMessage());
@@ -50,11 +48,15 @@ final class Handlers {
     }
 
     void feed(ByteBuffer out, boolean close) {
-        Resp.error(out, 500, Resp.E_INTERNAL, close);
+        ByteBuffer b = Resp.body();
+        db.feed(b);
+        Resp.send(out, 200, b, close);
     }
 
     void post(long id, ByteBuffer out, boolean close) {
-        Resp.error(out, 500, Resp.E_INTERNAL, close);
+        ByteBuffer b = Resp.body();
+        if (db.post(id, b)) Resp.send(out, 200, b, close);
+        else Resp.error(out, 404, Resp.E_POST_NOT_FOUND, close);
     }
 
     void create(long userId, byte[] user, int uo, int ul, byte[] body, int bo, int bl, ByteBuffer out, boolean close) {

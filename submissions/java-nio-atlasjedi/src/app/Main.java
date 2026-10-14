@@ -7,7 +7,7 @@ public final class Main {
 
     /** Opens the DB and builds the full wiring; the caller runs {@code server.run()} (on a thread in tests). */
     static Server start(String dbPath, byte[] secret, String host, int port) throws java.io.IOException {
-        Sqlite db = Sqlite.open(dbPath);
+        Db db = Db.open(dbPath);
         Router router = new Router(new Handlers(db), new Jwt(secret));
         return new Server(host, port, 4096, router);
     }

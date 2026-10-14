@@ -64,13 +64,13 @@ public class RouterTest {
         String badSub = JwtTest.sign(JwtTest.HDR, JwtTest.payload("\"x\"", "\"u\"", now + 3600));
         eq("bad payload", "401|{\"error\":\"invalid token payload\"}", req("POST", "/posts", "Bearer " + badSub, "{\"body\":\"x\"}"));
 
-        // stubs answer 500 and the connection stays usable
+        // pipelined requests on one kept-alive connection are answered in order
         try (Socket s = new Socket("127.0.0.1", port)) {
             s.setSoTimeout(5000);
             OutputStream o = s.getOutputStream();
-            o.write("GET /feed HTTP/1.1\r\nHost: x\r\n\r\nGET /health HTTP/1.1\r\nHost: x\r\n\r\n".getBytes(StandardCharsets.US_ASCII));
-            eq("stub feed", "500|{\"error\":\"internal server error\"}", ServerTest.readResponse(s.getInputStream()));
-            check(ServerTest.readResponse(s.getInputStream()).startsWith("200|"), "health after 500 on same connection");
+            o.write("GET /health HTTP/1.1\r\nHost: x\r\n\r\nGET /feed HTTP/1.1\r\nHost: x\r\n\r\n".getBytes(StandardCharsets.US_ASCII));
+            check(ServerTest.readResponse(s.getInputStream()).startsWith("200|{\"status\""), "health first");
+            check(ServerTest.readResponse(s.getInputStream()).startsWith("200|{\"posts\":["), "feed second");
         }
         System.out.println("RouterTest OK");
     }
