@@ -47,6 +47,32 @@ final class Db {
         return s.getBytes(StandardCharsets.US_ASCII);
     }
 
+    /** created_at of the last {@link #create}: ASCII bytes [0, createdLen). */
+    final byte[] createdAt = new byte[32];
+    int createdLen;
+    private final ByteBuffer createdBuf = ByteBuffer.wrap(createdAt);
+
+    /**
+     * Inserts the post and returns its id. RETURNING hands back its row on the first step, but the autocommit
+     * transaction only commits when the statement runs to DONE, so the second step is what makes this durable.
+     */
+    long create(long userId, byte[] body, int off, int len) {
+        try {
+            create.bindLong(1, userId);
+            create.bindText(2, body, off, len);
+            if (!create.step()) throw new IllegalStateException("INSERT RETURNING gave no row");
+            long id = create.colLong(0);
+            createdBuf.clear();
+            create.copyText(1, createdBuf);
+            createdLen = createdBuf.position();
+            if (create.step()) throw new IllegalStateException("INSERT RETURNING gave a second row");
+            wrote();
+            return id;
+        } finally {
+            create.reset();
+        }
+    }
+
     /** Placeholder checkpoint policy: PASSIVE every CHECKPOINT_EVERY writes. */
     void wrote() {
         if (++writes % CHECKPOINT_EVERY == 0) sqlite.walCheckpoint(0);
