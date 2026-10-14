@@ -18,6 +18,11 @@ final class Db {
 
     final Sqlite sqlite;
     final Sqlite.Stmt feed, post, create, like, exists, health;
+    private final Sqlite.Stmt begin, commit, rollback;
+    /** True between the tick's first write (BEGIN) and {@link #commitTick()}. */
+    private boolean inTx;
+    /** Test seam, runs right before COMMIT on the loop thread; a throw counts as a commit failure. */
+    Runnable commitHook;
     /** Committed writes since the last checkpoint; {@link #wrote()} counts, {@link #afterTick()} acts. */
     long writesSinceCheckpoint;
 
@@ -29,6 +34,44 @@ final class Db {
         like = sqlite.prepare("INSERT INTO likes (user_id, post_id) VALUES (?, ?) ON CONFLICT (user_id, post_id) DO NOTHING");
         exists = sqlite.prepare("SELECT 1 FROM posts WHERE id = ?");
         health = sqlite.prepare("SELECT 1");
+        begin = sqlite.prepare("BEGIN");
+        commit = sqlite.prepare("COMMIT");
+        rollback = sqlite.prepare("ROLLBACK");
+    }
+
+    /** Opens the tick's write transaction once; every write in the batch shares it. */
+    void beginIfNeeded() {
+        if (inTx) return;
+        try {
+            begin.step();
+        } finally {
+            begin.reset();
+        }
+        inTx = true;
+    }
+
+    /** True when the tick committed (or had nothing to commit). On failure the transaction is rolled back and false returned. */
+    boolean commitTick() {
+        if (!inTx) return true;
+        inTx = false;
+        try {
+            if (commitHook != null) commitHook.run();
+            try {
+                commit.step();
+            } finally {
+                commit.reset();
+            }
+            return true;
+        } catch (RuntimeException e) {
+            try {
+                rollback.step();
+            } catch (RuntimeException ignored) {
+                // no transaction left to roll back
+            } finally {
+                rollback.reset();
+            }
+            return false;
+        }
     }
 
     static Db open(String path) {
@@ -53,10 +96,11 @@ final class Db {
     private final ByteBuffer createdBuf = ByteBuffer.wrap(createdAt);
 
     /**
-     * Inserts the post and returns its id. RETURNING hands back its row on the first step, but the autocommit
-     * transaction only commits when the statement runs to DONE, so the second step is what makes this durable.
+     * Inserts the post into the tick's transaction and returns its id; the row is durable only after {@link #commitTick()}.
+     * The second step runs RETURNING to DONE.
      */
     long create(long userId, byte[] body, int off, int len) {
+        beginIfNeeded();
         try {
             create.bindLong(1, userId);
             create.bindText(2, body, off, len);
@@ -80,6 +124,7 @@ final class Db {
      */
     int like(long userId, long postId) {
         boolean missing = false;
+        beginIfNeeded();
         try {
             like.bindLong(1, userId);
             like.bindLong(2, postId);

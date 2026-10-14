@@ -12,8 +12,14 @@ final class Server {
     interface Handler {
         void handle(Conn c, Http.Request r, ByteBuffer out);
 
-        /** Runs on the loop thread after every select batch that handled at least one key. */
-        default void tick() {}
+        /**
+         * Runs on the loop thread after every select batch that handled at least one key: commits the batch.
+         * False means the commit failed and the deferred connections must be dropped without a response.
+         */
+        default boolean tick() { return true; }
+
+        /** Runs after the deferred responses were released (checkpoints and the like). */
+        default void afterTick() {}
     }
 
     private static final byte[] R400 = ascii("HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
@@ -40,6 +46,9 @@ final class Server {
         long lastActive;
         boolean closeAfterWrite;
         Conn prev, next; // intrusive LRU links (head = least recently active)
+        boolean deferred; // response held back until the tick's COMMIT returned (set by the Router on a write)
+        boolean queued;   // on the deferred list
+        Conn deferNext;
 
         Conn(SocketChannel ch, SelectionKey key) {
             this.ch = ch;
@@ -57,6 +66,7 @@ final class Server {
     private int openCount; // loop-thread counter, mirrored to the volatile
     private final int maxConns;
     private Conn lruHead, lruTail;
+    private Conn deferredHead, deferredTail;
 
     /** Cap derived from the fd limit: nofile - 512, clamped to [1024, 1_000_000]; 60_000 when unknown. */
     static int defaultMaxConns() {
@@ -82,10 +92,73 @@ final class Server {
     void run() {
         while (true) {
             try {
-                if (selector.select(this::onKey) > 0) handler.tick();
+                if (selector.select(this::onKey) > 0) {
+                    boolean ok = handler.tick();
+                    releaseDeferred(ok);
+                    handler.afterTick();
+                }
             } catch (Throwable t) {
                 // the loop never dies
             }
+        }
+    }
+
+    /** After the tick's COMMIT: ok sends every held response, otherwise the connections are dropped with an RST. */
+    private void releaseDeferred(boolean ok) {
+        Conn c = deferredHead;
+        deferredHead = deferredTail = null;
+        while (c != null) {
+            Conn next = c.deferNext;
+            c.deferNext = null;
+            c.queued = false;
+            c.deferred = false;
+            try {
+                if (c.key.attachment() != null) {
+                    if (!ok) evict(c);
+                    else if (c.pending != null) drainDeferred(c);
+                    else if (c.closeAfterWrite) close(c);
+                }
+            } catch (Throwable t) {
+                close(c);
+            }
+            c = next;
+        }
+    }
+
+    /** Writes the held response; a short write parks the rest under OP_WRITE like flush does. */
+    private void drainDeferred(Conn c) throws IOException {
+        ByteBuffer p = c.pending;
+        c.ch.write(p);
+        if (p.hasRemaining()) {
+            c.key.interestOps(SelectionKey.OP_WRITE);
+            return;
+        }
+        c.pending = null;
+        if (c.closeAfterWrite) close(c);
+    }
+
+    /** Appends the shared out buffer to the connection's held response (only when it is not empty). */
+    private void hold(Conn c) {
+        out.flip();
+        int n = out.remaining();
+        if (n > 0) {
+            ByteBuffer p = c.pending;
+            if (p == null) {
+                p = ByteBuffer.allocateDirect(n);
+            } else {
+                ByteBuffer q = ByteBuffer.allocateDirect(p.remaining() + n);
+                q.put(p);
+                p = q;
+            }
+            p.put(out);
+            p.flip();
+            c.pending = p;
+        }
+        out.clear();
+        if (!c.queued) {
+            c.queued = true;
+            if (deferredTail != null) deferredTail.deferNext = c; else deferredHead = c;
+            deferredTail = c;
         }
     }
 
@@ -213,12 +286,13 @@ final class Server {
             }
             handler.handle(c, req, out);
             off += n;
+            if (c.deferred && out.remaining() < OUT_FLUSH_AT) hold(c); // nothing may reach the socket before COMMIT
             if (!req.keepAlive) {
                 c.closeAfterWrite = true;
                 off = end;
                 break;
             }
-            if (out.remaining() < OUT_FLUSH_AT) {
+            if (!c.deferred && out.remaining() < OUT_FLUSH_AT) {
                 // large pipelined batch: flush now; if the socket is full, park the rest until drained
                 if (!flush(c)) stop = true;
             }
@@ -234,7 +308,8 @@ final class Server {
             }
         }
         c.partialLen = rest;
-        if (!stop) flush(c);
+        if (c.deferred) hold(c);
+        else if (!stop) flush(c);
     }
 
     /** Writes the shared out buffer. Returns true when fully written (buffer reset), false when parked as pending. */

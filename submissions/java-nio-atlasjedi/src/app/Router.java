@@ -45,7 +45,12 @@ final class Router implements Server.Handler {
     }
 
     @Override
-    public void tick() {
+    public boolean tick() {
+        return h.db().commitTick();
+    }
+
+    @Override
+    public void afterTick() {
         h.db().afterTick();
     }
 
@@ -53,8 +58,10 @@ final class Router implements Server.Handler {
     public void handle(Server.Conn c, Http.Request r, ByteBuffer out) {
         boolean close = !r.keepAlive;
         int mark = out.position();
+        long w = h.db().writesSinceCheckpoint;
         try {
             dispatch(r, out, close);
+            if (h.db().writesSinceCheckpoint != w) c.deferred = true; // the 2xx waits for the tick's COMMIT
         } catch (Throwable t) {
             out.position(mark); // drop anything half-written, the body buffer is reset by Resp.body() next use
             Resp.error(out, 500, Resp.E_INTERNAL, close);
