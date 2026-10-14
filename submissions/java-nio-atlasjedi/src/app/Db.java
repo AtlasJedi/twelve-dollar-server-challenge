@@ -73,6 +73,37 @@ final class Db {
         }
     }
 
+    /**
+     * Likes a post: 1 inserted, 0 already liked, -1 no such post. changes() is 0 both for "already liked" and for
+     * "no such post", so existence decides; with foreign_keys=ON the insert on a missing post fails with a FOREIGN KEY
+     * constraint, which is swallowed (and only that failure).
+     */
+    int like(long userId, long postId) {
+        boolean missing = false;
+        try {
+            like.bindLong(1, userId);
+            like.bindLong(2, postId);
+            like.step();
+            if (sqlite.changes() == 1) {
+                wrote();
+                return 1;
+            }
+        } catch (IllegalStateException e) {
+            String m = e.getMessage();
+            if (m == null || !m.contains("FOREIGN KEY")) throw e;
+            missing = true;
+        } finally {
+            like.reset();
+        }
+        if (missing) return -1;
+        try {
+            exists.bindLong(1, postId);
+            return exists.step() ? 0 : -1;
+        } finally {
+            exists.reset();
+        }
+    }
+
     /** Placeholder checkpoint policy: PASSIVE every CHECKPOINT_EVERY writes. */
     void wrote() {
         if (++writes % CHECKPOINT_EVERY == 0) sqlite.walCheckpoint(0);

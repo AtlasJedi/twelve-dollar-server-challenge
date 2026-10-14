@@ -5,8 +5,7 @@ import java.nio.charset.StandardCharsets;
 
 /**
  * The five endpoints. Each handler fills Resp.body() and calls Resp.send only on success, so an exception
- * leaves the out buffer untouched and the Router can write a clean 500. Health, feed and post are real; create is real; like is a
- * stub until Task 10.
+ * leaves the out buffer untouched and the Router can write a clean 500. Health, feed and post are real; create and like are real.
  */
 final class Handlers {
     private static final byte[] H_OK = ascii("{\"status\":\"ok\",\"db\":\"ok\",\"uptime_s\":");
@@ -83,6 +82,15 @@ final class Handlers {
     }
 
     void like(long userId, long postId, ByteBuffer out, boolean close) {
-        Resp.error(out, 500, Resp.E_INTERNAL, close);
+        int rc = db.like(userId, postId); // returns after the commit
+        if (rc < 0) { Resp.error(out, 404, Resp.E_POST_NOT_FOUND, close); return; }
+        ByteBuffer b = Resp.body();
+        b.put(rc == 1 ? L_NEW : L_AGAIN);
+        Resp.num(b, postId);
+        b.put((byte) '}');
+        Resp.send(out, rc == 1 ? 201 : 200, b, close);
     }
+
+    private static final byte[] L_NEW = ascii("{\"liked\":true,\"already_liked\":false,\"post_id\":"),
+        L_AGAIN = ascii("{\"liked\":true,\"already_liked\":true,\"post_id\":");
 }
