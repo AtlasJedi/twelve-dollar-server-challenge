@@ -22,6 +22,9 @@ public final class Main {
         String secret = env("JWT_SECRET", "twelve-dollar-challenge");
         String host = env("HOST", "127.0.0.1");
         int port = Integer.parseInt(env("PORT", "3000"));
-        start(db, secret.getBytes(StandardCharsets.UTF_8), host, port).run();
+        Server server = start(db, secret.getBytes(StandardCharsets.UTF_8), host, port);
+        System.err.println("java-nio: listening on " + host + ":" + server.port() + ", maxConns="
+            + Server.defaultMaxConns() + ", pid=" + ProcessHandle.current().pid());
+        server.run();
     }
 }
