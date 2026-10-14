@@ -8,9 +8,19 @@ import java.nio.channels.*;
 
 /** Single-threaded NIO event loop: accept, read, write with backpressure. */
 final class Server {
-    /** Temporary line-echo mode (Task 3). Task 4 replaces the framing with Http. */
-    static boolean echoMode = false;
-    static int echoRepeat = 1;
+    /** Consume one complete request already framed by Http; write the response into out. */
+    interface Handler {
+        void handle(Conn c, Http.Request r, ByteBuffer out);
+    }
+
+    private static final byte[] R400 = ascii("HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+    private static final byte[] R413 = ascii("HTTP/1.1 413 Content Too Large\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+    private static final int OUT_CAP = 256 * 1024;
+    private static final int OUT_FLUSH_AT = 64 * 1024; // flush mid-loop when less than this is free
+
+    private static byte[] ascii(String s) {
+        return s.getBytes(java.nio.charset.StandardCharsets.US_ASCII);
+    }
 
     private static volatile int open;
 
@@ -25,6 +35,7 @@ final class Server {
         int partialLen;
         ByteBuffer pending;
         long lastActive;
+        boolean closeAfterWrite;
 
         Conn(SocketChannel ch, SelectionKey key) {
             this.ch = ch;
@@ -35,9 +46,14 @@ final class Server {
     private final Selector selector;
     private final ServerSocketChannel listener;
     private final ByteBuffer readBuf = ByteBuffer.allocateDirect(64 * 1024);
+    private final ByteBuffer out = ByteBuffer.allocateDirect(OUT_CAP); // reused for every response batch
+    private final byte[] work = new byte[64 * 1024];                   // read bytes as heap array for the parser
+    private final Http.Request req = new Http.Request();
+    private final Handler handler;
     private int openCount; // loop-thread counter, mirrored to the volatile
 
-    Server(String host, int port, int backlog) throws IOException {
+    Server(String host, int port, int backlog, Handler handler) throws IOException {
+        this.handler = handler;
         selector = Selector.open();
         listener = ServerSocketChannel.open();
         listener.configureBlocking(false);
@@ -120,60 +136,100 @@ final class Server {
         }
         c.lastActive = System.nanoTime();
         readBuf.flip();
-        ByteBuffer out = frame(c, readBuf);
-        if (out != null) write(c, out);
+        if (c.partialLen == 0) {
+            readBuf.get(work, 0, n);
+            process(c, work, n);
+        } else {
+            int need = c.partialLen + n;
+            if (c.partial.length < need) c.partial = java.util.Arrays.copyOf(c.partial, Math.max(need, c.partial.length * 2));
+            readBuf.get(c.partial, c.partialLen, n);
+            c.partialLen = need;
+            process(c, c.partial, need);
+        }
     }
 
     /**
-     * FRAMING (temporary, Task 3): splits on '\n' and echoes each line echoRepeat times.
-     * Task 4 replaces this with Http parsing + Handler. Returns the response bytes or null.
+     * Frames buf[0..end) into requests (pipelining), appends all responses to the shared out buffer
+     * and writes it once. The unconsumed tail goes to c.partial.
      */
-    private ByteBuffer frame(Conn c, ByteBuffer in) {
-        int have = in.remaining();
-        byte[] data = new byte[c.partialLen + have];
-        if (c.partialLen > 0) System.arraycopy(c.partial, 0, data, 0, c.partialLen);
-        in.get(data, c.partialLen, have);
-        int end = data.length;
-        int last = -1;
-        for (int i = end - 1; i >= 0; i--) {
-            if (data[i] == '\n') { last = i; break; }
-        }
-        int rest = end - (last + 1);
-        if (rest > 0) {
-            if (c.partial == null || c.partial.length < rest) c.partial = new byte[Math.max(rest, 256)];
-            System.arraycopy(data, last + 1, c.partial, 0, rest);
-        }
-        c.partialLen = rest;
-        if (last < 0) return null;
-        int repeat = echoMode ? echoRepeat : 1;
-        int framed = last + 1;
-        ByteBuffer out = ByteBuffer.allocateDirect(framed * repeat);
-        int start = 0;
-        for (int i = 0; i < framed; i++) {
-            if (data[i] == '\n') {
-                for (int r = 0; r < repeat; r++) out.put(data, start, i + 1 - start);
-                start = i + 1;
+    private void process(Conn c, byte[] buf, int end) throws IOException {
+        int off = 0;
+        out.clear();
+        boolean stop = false;
+        while (off < end && !stop) {
+            int n = Http.parse(buf, off, end - off, req);
+            if (n == Http.NEED_MORE) break;
+            if (n == Http.MALFORMED) {
+                out.put(R400);
+                c.closeAfterWrite = true;
+                off = end;
+                break;
+            }
+            if (n == Http.TOO_LARGE) {
+                out.put(R413);
+                c.closeAfterWrite = true;
+                off = end;
+                break;
+            }
+            handler.handle(c, req, out);
+            off += n;
+            if (!req.keepAlive) {
+                c.closeAfterWrite = true;
+                off = end;
+                break;
+            }
+            if (out.remaining() < OUT_FLUSH_AT) {
+                // large pipelined batch: flush now; if the socket is full, park the rest until drained
+                if (!flush(c)) stop = true;
             }
         }
-        out.flip();
-        return out;
+        // keep the unconsumed tail
+        int rest = end - off;
+        if (rest > 0) {
+            if (buf == c.partial) {
+                if (off > 0) System.arraycopy(buf, off, buf, 0, rest);
+            } else {
+                if (c.partial == null || c.partial.length < rest) c.partial = new byte[Math.max(rest, 256)];
+                System.arraycopy(buf, off, c.partial, 0, rest);
+            }
+        }
+        c.partialLen = rest;
+        if (!stop) flush(c);
     }
 
-    private void write(Conn c, ByteBuffer out) throws IOException {
+    /** Writes the shared out buffer. Returns true when fully written (buffer reset), false when parked as pending. */
+    private boolean flush(Conn c) throws IOException {
+        out.flip();
+        if (!out.hasRemaining()) {
+            out.clear();
+            if (c.closeAfterWrite) close(c);
+            return true;
+        }
         c.ch.write(out);
         if (out.hasRemaining()) {
-            c.pending = out;
+            ByteBuffer p = ByteBuffer.allocateDirect(out.remaining()); // copy: the shared buffer stays reusable
+            p.put(out).flip();
+            out.clear();
+            c.pending = p;
             c.key.interestOps(SelectionKey.OP_WRITE);
+            return false;
         }
+        out.clear();
+        if (c.closeAfterWrite) close(c);
+        return true;
     }
 
     private void drain(Conn c) throws IOException {
         ByteBuffer p = c.pending;
         if (p == null) return;
         c.ch.write(p);
-        if (!p.hasRemaining()) {
-            c.pending = null;
-            c.key.interestOps(SelectionKey.OP_READ);
+        if (p.hasRemaining()) return;
+        c.pending = null;
+        if (c.closeAfterWrite) {
+            close(c);
+            return;
         }
+        c.key.interestOps(SelectionKey.OP_READ);
+        if (c.partialLen > 0) process(c, c.partial, c.partialLen); // requests parked behind the short write
     }
 }
