@@ -143,11 +143,13 @@ final class Sqlite implements AutoCloseable {
         }
     }
 
-    /** PASSIVE=0, FULL=1, RESTART=2, TRUNCATE=3. */
-    void walCheckpoint(int mode) {
-        try {
-            int rc = (int) WAL_CHECKPOINT.invokeExact(db, MemorySegment.NULL, mode, MemorySegment.NULL, MemorySegment.NULL);
+    /** PASSIVE=0, FULL=1, RESTART=2, TRUNCATE=3. Returns the number of frames in the WAL (pnLog). */
+    int walCheckpoint(int mode) {
+        try (Arena a = Arena.ofConfined()) {
+            MemorySegment pnLog = a.allocate(JAVA_INT), pnCkpt = a.allocate(JAVA_INT);
+            int rc = (int) WAL_CHECKPOINT.invokeExact(db, MemorySegment.NULL, mode, pnLog, pnCkpt);
             if (rc != 0) throw new IllegalStateException("sqlite3_wal_checkpoint_v2 rc=" + rc + ": " + errmsg());
+            return pnLog.get(JAVA_INT, 0);
         } catch (RuntimeException | Error e) {
             throw e;
         } catch (Throwable t) {

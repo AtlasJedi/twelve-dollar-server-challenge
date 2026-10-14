@@ -11,6 +11,9 @@ final class Server {
     /** Consume one complete request already framed by Http; write the response into out. */
     interface Handler {
         void handle(Conn c, Http.Request r, ByteBuffer out);
+
+        /** Runs on the loop thread after every select batch that handled at least one key. */
+        default void tick() {}
     }
 
     private static final byte[] R400 = ascii("HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
@@ -68,7 +71,7 @@ final class Server {
     void run() {
         while (true) {
             try {
-                selector.select(this::onKey);
+                if (selector.select(this::onKey) > 0) handler.tick();
             } catch (Throwable t) {
                 // the loop never dies
             }

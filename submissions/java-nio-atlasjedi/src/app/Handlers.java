@@ -18,6 +18,10 @@ final class Handlers {
         this.db = db;
     }
 
+    Db db() {
+        return db;
+    }
+
     private static byte[] ascii(String s) {
         return s.getBytes(StandardCharsets.US_ASCII);
     }

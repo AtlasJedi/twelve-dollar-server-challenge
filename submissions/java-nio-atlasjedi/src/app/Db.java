@@ -13,13 +13,13 @@ final class Db {
         K_ID = ascii("{\"id\":"), K_BODY = ascii(",\"body\":"), K_AT = ascii(",\"created_at\":\""),
         K_AUTHOR = ascii("\",\"author\":"), K_LIKES = ascii(",\"like_count\":");
 
-    /** Writes between placeholder checkpoints (element 11 replaces the policy). */
-    static final int CHECKPOINT_EVERY = 1000;
+    /** Committed writes that trigger a PASSIVE checkpoint on the next loop tick. */
+    static final int CHECKPOINT_WRITES = 1000;
 
     final Sqlite sqlite;
     final Sqlite.Stmt feed, post, create, like, exists, health;
-    /** Committed writes since open; Tasks 9-10 call {@link #wrote()} after each commit. */
-    long writes;
+    /** Committed writes since the last checkpoint; {@link #wrote()} counts, {@link #afterTick()} acts. */
+    long writesSinceCheckpoint;
 
     private Db(Sqlite sqlite) {
         this.sqlite = sqlite;
@@ -104,9 +104,17 @@ final class Db {
         }
     }
 
-    /** Placeholder checkpoint policy: PASSIVE every CHECKPOINT_EVERY writes. */
+    /** Counts a committed write; never checkpoints (that would run inside a request). */
     void wrote() {
-        if (++writes % CHECKPOINT_EVERY == 0) sqlite.walCheckpoint(0);
+        writesSinceCheckpoint++;
+    }
+
+    /** Called by the loop after each select batch: PASSIVE checkpoint once enough writes accumulated. */
+    void afterTick() {
+        if (writesSinceCheckpoint >= CHECKPOINT_WRITES) {
+            writesSinceCheckpoint = 0;
+            sqlite.walCheckpoint(0);
+        }
     }
 
     /** True if SELECT 1 returns a row. */

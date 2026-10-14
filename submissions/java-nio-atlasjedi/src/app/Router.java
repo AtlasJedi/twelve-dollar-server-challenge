@@ -45,6 +45,11 @@ final class Router implements Server.Handler {
     }
 
     @Override
+    public void tick() {
+        h.db().afterTick();
+    }
+
+    @Override
     public void handle(Server.Conn c, Http.Request r, ByteBuffer out) {
         boolean close = !r.keepAlive;
         int mark = out.position();
