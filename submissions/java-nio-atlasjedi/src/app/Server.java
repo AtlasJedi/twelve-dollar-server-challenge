@@ -63,6 +63,8 @@ final class Server {
     private final byte[] work = new byte[64 * 1024];                   // read bytes as heap array for the parser
     private final Http.Request req = new Http.Request();
     private final Handler handler;
+    /** One consumer for the whole run: a method ref in the loop would allocate a lambda per iteration. */
+    private final java.util.function.Consumer<SelectionKey> keyConsumer = this::onKey;
     private int openCount; // loop-thread counter, mirrored to the volatile
     private final int maxConns;
     private Conn lruHead, lruTail;
@@ -92,7 +94,7 @@ final class Server {
     void run() {
         while (true) {
             try {
-                if (selector.select(this::onKey) > 0) {
+                if (selector.select(keyConsumer) > 0) {
                     boolean ok = handler.tick();
                     releaseDeferred(ok);
                     handler.afterTick();

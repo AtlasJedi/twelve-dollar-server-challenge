@@ -17,7 +17,8 @@ final class Db {
     static final int CHECKPOINT_WRITES = 1000;
 
     final Sqlite sqlite;
-    final Sqlite.Stmt feed, post, create, like, exists, health;
+    final Sqlite.Stmt feed, post, like, exists, health;
+    private final Sqlite.Stmt insertOnly, createdById;
     private final Sqlite.Stmt begin, commit, rollback;
     /** True between the tick's first write (BEGIN) and {@link #commitTick()}. */
     private boolean inTx;
@@ -30,7 +31,8 @@ final class Db {
         this.sqlite = sqlite;
         feed = sqlite.prepare(POST_COLS + " ORDER BY p.created_at DESC, p.id DESC LIMIT 20");
         post = sqlite.prepare(POST_COLS + " WHERE p.id = ?");
-        create = sqlite.prepare("INSERT INTO posts (user_id, body) VALUES (?, ?) RETURNING id, created_at");
+        insertOnly = sqlite.prepare("INSERT INTO posts (user_id, body) VALUES (?, ?)");
+        createdById = sqlite.prepare("SELECT created_at FROM posts WHERE id = ?");
         like = sqlite.prepare("INSERT INTO likes (user_id, post_id) VALUES (?, ?) ON CONFLICT (user_id, post_id) DO NOTHING");
         exists = sqlite.prepare("SELECT 1 FROM posts WHERE id = ?");
         health = sqlite.prepare("SELECT 1");
@@ -97,25 +99,31 @@ final class Db {
     private final java.lang.foreign.MemorySegment createdSeg = java.lang.foreign.MemorySegment.ofBuffer(createdBuf);
 
     /**
-     * Inserts the post into the tick's transaction and returns its id; the row is durable only after {@link #commitTick()}.
-     * The second step runs RETURNING to DONE.
+     * Inserts the post into the tick's transaction and returns its id (durable only after {@link #commitTick()});
+     * plain INSERT, then SELECT created_at by lastInsertRowid (RETURNING measured 7x slower, see 06-measurements ab-create).
      */
     long create(long userId, byte[] body, int off, int len) {
         beginIfNeeded();
+        long id;
         try {
-            create.bindLong(1, userId);
-            create.bindText(2, body, off, len);
-            if (!create.step()) throw new IllegalStateException("INSERT RETURNING gave no row");
-            long id = create.colLong(0);
-            createdBuf.clear();
-            create.copyText(1, createdBuf, createdSeg);
-            createdLen = createdBuf.position();
-            if (create.step()) throw new IllegalStateException("INSERT RETURNING gave a second row");
-            wrote();
-            return id;
+            insertOnly.bindLong(1, userId);
+            insertOnly.bindText(2, body, off, len);
+            insertOnly.step();
+            id = sqlite.lastInsertRowid();
         } finally {
-            create.reset();
+            insertOnly.reset();
         }
+        try {
+            createdById.bindLong(1, id);
+            if (!createdById.step()) throw new IllegalStateException("created row not found");
+            createdBuf.clear();
+            createdById.copyText(0, createdBuf, createdSeg);
+            createdLen = createdBuf.position();
+        } finally {
+            createdById.reset();
+        }
+        wrote();
+        return id;
     }
 
     /**
